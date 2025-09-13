@@ -1,2 +1,1 @@
-# speech
-deep learning project
+We investigate the use of Conformal Prediction to estimate uncertainty in Speaker Identification self-supervised model. We use speech embeddings from the 5th layer of HuBERT base on the VoxCeleb1 dataset. We evaluate 3 different conformal prediction scores: Basic, Adaptive Prediction Sets (APS) , and Regularized APS (RAPS)  to quantify uncertainty in classification outputs. Results demonstrate that conformal predictors with both the basic score (relying directly on the output) and the Regularized APS scores provide well-calibrated prediction sets –with 90% coverage and 3-6 averaged prediction set size. 
