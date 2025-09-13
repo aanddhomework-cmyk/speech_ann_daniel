@@ -1,0 +1,7 @@
+# Ignore all zip files
+*.zip
+# Ignore backup best results folder
+backup best results/
+# Ignore archive folder
+archive/
+embedding_batches_zip/batch_000.zip
