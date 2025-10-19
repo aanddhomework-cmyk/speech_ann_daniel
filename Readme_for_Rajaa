@@ -1,0 +1,124 @@
+# Speech Ann Daniel — Conformal Prediction for Speaker Identification
+
+This repository implements an experiment that uses HuBERT embeddings (layer 5) from VoxCeleb1 and a linear classification head to study conformal prediction methods (Basic / APS / RAPS) for uncertainty quantification in speaker identification.
+
+This README documents what each file in the repository does, required dependencies, and concrete commands to reproduce the main steps: extract embeddings → build splits → train a linear head → run conformal prediction.
+
+Overview
+- Approach: extract HuBERT layer-5 sequence embeddings for each wav file, mean-pool to a fixed-length vector, save embeddings into zip batches. Split speakers into train/val/calibration/test (multi-fold), train a linear classifier on mean-pooled embeddings, then run conformal prediction (RAPS/APS/Basic) on softmax outputs to produce prediction sets and measure coverage / set sizes.
+- Data: expects VoxCeleb1-style directory structure (see extract script).
+
+Requirements
+- Python 3.8+
+- PyTorch (CPU or CUDA) — install from https://pytorch.org/ matching your CUDA.
+- torchaudio
+- transformers (for HuBERT)
+- numpy
+- tqdm
+- matplotlib
+
+Minimal pip install (CPU example):
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install transformers numpy tqdm matplotlib
+
+If you have an NVIDIA GPU, install the appropriate CUDA wheels from pytorch.org.
+
+Quick start (recommended order)
+1. Prepare raw wav files (VoxCeleb-style). Update dataset path in extract_HB_layer5.py.
+2. Run extract_HB_layer5.py to extract HuBERT L5 per-file embeddings and pack them into zipped batches under embedding_batches_zip/.
+3. Run make_new_splits_multifold.py to create splits JSON files in splits/.
+4. Train linear classifier with train_linear.py to produce linear_sid_best.pt.
+5. Run conformal_prediction.py to evaluate conformal methods on the folds.
+
+- extract_HB_layer5.py
+  - Extracts HuBERT-base hidden states (transformer layer 5) for each wav file, saves per-file tensors (.pt) and groups them into zip batches (embedding_batches_zip/batch_XXX.zip). Writes logs to embedding_batches_zip/logs/.
+  - Key variables to configure at top:
+    - vox_root_parent: set to the parent of 'wav' and 'test_wav' (where your WAV files live).
+    - batch_size_files: how many files per zip batch (default 100).
+    - layer_idx: which HuBERT transformer layer to extract (default 5).
+    - dtype_to_save, target_sr, device selection.
+  - Output: zipped .pt files containing full sequence embeddings (shape [T_feat, 768]) and run_log / error logs.
+
+- embedding_batches_zip/logs/run_log.txt
+  - Log produced by the extractor showing progress and produced zip batches. Useful to confirm extraction status or to resume without reprocessing.
+
+- mean_pool_data_loader.py
+  - ZipEmbeddingDataset: a PyTorch Dataset that reads per-file .pt sequence tensors directly from the zip archives, mean-pools each sequence to a fixed-length vector (mean across time → shape [768]), optionally L2-normalizes the vector, and returns (x, y).
+  - Used by train_linear.py and conformal_prediction.py.
+  - Important: the dataset expects the split JSONs to reference zip_dir (the folder name of the root provided) and zip file names.
+
+- make_new_splits_multifold.py
+  - Scans embedding_batches_zip/* batch_*.zip and builds speaker-wise index, then produces K (default 5) splits JSON files in splits/new_splits_fold{0..4}.json.
+  - Also writes splits/new_splits.json (alias for fold 0).
+  - Config at top: ROOTS, K_FOLDS, fractions (TRAIN/VAL/TEST/CALIB).
+  - Output JSON format includes:
+    - label_map (speaker -> int)
+    - train / val / test / calibration lists of items (each item has zip, zip_dir, name, spk)
+    - split_info metadata.
+
+- splits/new_splits*.json (new_splits.json and new_splits_fold0..4.json)
+  - The produced split metadata for each fold. Each file contains a large label_map and lists of items; feed this to the dataset or conformal script.
+
+- train_linear.py
+  - Trains a linear (nn.Linear) classifier on the mean-pooled embeddings from mean_pool_data_loader.ZipEmbeddingDataset.
+  - Configurable options at top (SPLIT_JSON, EMB_ROOT, BATCH_TRAIN, BATCH_VAL, FEATURE_DIM, LR, EXTRA_EPOCHS, CKPT_PATH, RESUME).
+  - Saves best checkpoint to linear_sid_best.pt (includes state_dict, num_classes, feat_dim, optimizer/scheduler states and meta).
+  - Produces plots in plots/ (loss.png, accuracy.png) and history json.
+  
+- linear_sid_best.pt
+  - Saved checkpoint produced by train_linear.py (binary). Contains model weights and metadata. You need this (or a similar checkpoint) for conformal_prediction.py to compute softmax probs and predictions.
+
+- conformal_prediction.py
+  - Loads the trained linear head (expects checkpoint with "state_dict", "num_classes", and optionally "feat_dim"), constructs the ZipEmbeddingDataset for calibration and test splits, collects softmax probabilities, fits a ConformalPredictor (Basic / APS / RAPS), and evaluates coverage / average set size / top1 accuracy across the provided folds.
+  - Config at bottom:
+    - EMB_ROOTS (list of embedding roots)
+    - CKPT_PATH (path to linear head checkpoint)
+    - BATCH, NUM_WORKERS, PIN_MEMORY, ALPHA, RAPS_REG, RAPS_KREG
+    - SPLIT_FILES list (the fold jsons)
+  - Example SCORE choices: "RAPS", "APS", "Basic".
+  - Outputs per-fold metrics and averaged results.
+
+How to run each stage:
+
+1) Extract HuBERT layer-5 embeddings
+- Edit extract_HB_layer5.py:
+  - Set vox_root_parent to the base path where your VoxCeleb wav/ and test_wav/ folders live.
+  - Adjust device or leave the automatic pick.
+- Run:
+  python extract_HB_layer5.py
+- Result: embedding_batches_zip/ with batch_000.zip ... each zip contains .pt per-audio sequence tensors. Logs in embedding_batches_zip/logs/.
+
+2) Build splits (multi-fold)
+- After extraction finishes and embedding_batches_zip contains batch_*.zip:
+  python make_new_splits_multifold.py
+- Result: splits/new_splits_fold0.json ... fold4, and splits/new_splits.json (alias to fold 0).
+
+3) Train linear classifier
+- Important: update FEATURE_DIM in train_linear.py to match the feature dim (768) before running:
+  - set FEATURE_DIM = 768
+- Then run:
+  python train_linear.py
+- Notes:
+  - The script will attempt to resume from linear_sid_best.pt if RESUME=True and the checkpoint exists.
+  - If training on GPU, ensure appropriate torch build is installed.
+  - Saved best checkpoint: linear_sid_best.pt
+
+4) Run conformal prediction (evaluate)
+- Edit conformal_prediction.py if needed (CKPT_PATH, EMB_ROOTS, ALPHA, SCORE).
+- Run:
+  python conformal_prediction.py
+- The script will iterate over the SPLIT_FILES (fold0..fold4), compute calibration and test softmaxes, fit ConformalPredictor, and report coverage, set sizes, top1, and averaged metrics.
+
+Tips, caveats & troubleshooting
+- FEATURE_DIM mismatch: mean_pool_data_loader returns mean pooled vectors from 768-dim HuBERT hidden states. Make sure FEATURE_DIM in train_linear.py matches that (set to 768).
+- File paths in split JSON: each item contains "zip_dir" which must match the name of the folder provided in roots (ZipEmbeddingDataset maps Path(r).name to the root). For example, if the extractor wrote to embedding_batches_zip/ then the split must list items with zip_dir "embedding_batches_zip". make_new_splits_multifold.py uses the zip parent folder name automatically.
+- If you see "No .wav files found" in extraction: verify vox_root_parent and subfolders exist and contain .wav files.
+- Out-of-memory on GPU: scripts contain CPU fallback logic. If many OOM errors appear, reduce batch sizes (BATCH in conformal_prediction.py or BATCH_TRAIN in training) and/or set NUM_WORKERS to 0.
+- Zip corruption: if a zip file is corrupted, extract_HB_layer5.py logs errors in embedding_batches_zip/logs/extract_errors.txt and run_log.txt. Recreate that batch or re-extract the problematic files.
+- Running with transformers: the first run will download the HuBERT model weights (~1-2GB). Ensure you have internet connectivity and disk space.
+- Reproducibility: make_new_splits_multifold.py uses deterministic seeds; fold seeds are printed in split_info inside each JSON.
+
+Acknowledgements / libraries
+- HuggingFace transformers (facebook/hubert-base-ls960)
+- PyTorch / torchaudio
+- numpy, tqdm, matplotlib
